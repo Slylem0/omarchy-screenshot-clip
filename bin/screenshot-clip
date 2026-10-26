@@ -6,23 +6,32 @@
 # images that were only ever meant to be pasted. This captures the same way
 # (Omarchy's own region picker, so smart/region/window/fullscreen all behave
 # identically) but puts the image on the clipboard and keeps just a temporary
-# copy under $XDG_RUNTIME_DIR, which lives in RAM and is wiped on reboot. The
-# copy feeds the notification thumbnail; clicking the notification opens it in
-# Tensaku, where Ctrl+S saves it to ~/Pictures and Enter copies the edited
-# image without saving anything.
+# copy under $XDG_RUNTIME_DIR, which lives in RAM and is wiped on reboot.
+#
+# The copy is handed to the plugin's card in the Omarchy shell (thumbnail with
+# Save, Edit and Close). When the shell service is not running, a notification
+# takes its place: click it to open the copy in Tensaku.
 #
 # Usage:
 #   screenshot-clip [smart|region|windows|fullscreen]   capture (default smart)
-#   screenshot-clip edit <file>                         open a copy in Tensaku
+#   screenshot-clip save <file>     copy a temporary screenshot into ~/Pictures
+#   screenshot-clip edit <file>     open it in Tensaku (Ctrl+S saves, Enter copies)
+#   screenshot-clip copy <file>     put it back on the clipboard
+#   screenshot-clip delete <file>   drop the temporary copy
+#   screenshot-clip list            temporary copies, newest first
+#
+# SCREENSHOT_CLIP_KEEP (default 10) sets how many temporary copies are kept;
+# SCREENSHOT_CLIP_LANG=es|en forces the language of the fallback notification.
 
 set -o pipefail
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+PLUGIN_ID="slylem0.screenshot-clip"
 TEMP_DIR="${XDG_RUNTIME_DIR:-/tmp}/screenshot-clip"
-KEEP=10
+KEEP="${SCREENSHOT_CLIP_KEEP:-10}"
+[[ $KEEP =~ ^[0-9]+$ ]] && ((KEEP >= 1)) || KEEP=10
 NOTIFY_MS=6000
 
-# SCREENSHOT_CLIP_LANG=es|en forces a language; anything else follows the locale.
 spanish() {
   case "${SCREENSHOT_CLIP_LANG:-auto}" in
   es) return 0 ;;
@@ -42,8 +51,7 @@ pictures_dir() {
   echo "${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
 }
 
-# Keep the newest $KEEP temporary copies; older ones can no longer be clicked
-# from a live notification anyway.
+# Keep the newest $KEEP temporary copies.
 prune() {
   local old
   # shellcheck disable=SC2012 # our own fixed-pattern names, newest first
@@ -51,17 +59,42 @@ prune() {
   [[ -n $old ]] && xargs -d '\n' rm -f <<<"$old"
 }
 
-edit() {
-  local file="$1"
-  if [[ ! -f $file ]]; then
-    omarchy-notification-send \
-      "$(msg "La captura ya no está disponible" "Screenshot no longer available")" \
-      "$(msg "Las copias temporales se borran al reiniciar." "Temporary copies are cleared on reboot.")" \
-      -t 4000 || true
-    return 1
-  fi
+# save/copy/delete/edit can be reached over the shell's IPC, so they only ever
+# act on a regular file directly inside the temporary folder.
+temp_file() {
+  local file="$1" dir real
+  dir=$(realpath -m -- "$TEMP_DIR")
+  real=$(realpath -m -- "$file")
+  [[ $(dirname -- "$real") == "$dir" && -f $real && ! -L $file ]] || return 1
+  echo "$real"
+}
 
-  local dir
+gone() {
+  omarchy-notification-send \
+    "$(msg "La captura ya no está disponible" "Screenshot no longer available")" \
+    "$(msg "Las copias temporales se borran al reiniciar." "Temporary copies are cleared on reboot.")" \
+    -t 4000 || true
+  exit 1
+}
+
+save() {
+  local file dir name dest n=2
+  file=$(temp_file "$1") || gone
+  dir=$(pictures_dir)
+  mkdir -p "$dir" || exit 1
+  name=$(basename -- "$file" .png)
+  dest="$dir/$name.png"
+  while [[ -e $dest ]]; do
+    dest="$dir/$name-$n.png"
+    n=$((n + 1))
+  done
+  cp -- "$file" "$dest" || exit 1
+  echo "$dest"
+}
+
+edit() {
+  local file dir
+  file=$(temp_file "$1") || gone
   dir=$(pictures_dir)
   mkdir -p "$dir"
 
@@ -72,6 +105,23 @@ edit() {
     --actions-on-enter save-to-clipboard \
     --copy-command wl-copy \
     --early-exit
+}
+
+copy() {
+  local file
+  file=$(temp_file "$1") || gone
+  wl-copy --type image/png <"$file"
+}
+
+delete() {
+  local file
+  file=$(temp_file "$1") || exit 1
+  rm -f -- "$file"
+}
+
+list() {
+  # shellcheck disable=SC2012 # our own fixed-pattern names, newest first
+  ls -1t "$TEMP_DIR"/screenshot-*.png 2>/dev/null || true
 }
 
 # Cursor handling mirrors omarchy-capture-screenshot: software cursors would be
@@ -112,8 +162,10 @@ capture() {
   wl-copy --type image/png <"$file"
   prune
 
-  # Omarchy's notifications take one click action and no buttons; right-click
-  # already dismisses a toast, so say so.
+  # The card answers "ok"; anything else means the plugin's service is not
+  # loaded, so fall back to a notification whose click opens the editor.
+  [[ $(omarchy-shell -q "$PLUGIN_ID" show "$file" 2>/dev/null) == ok ]] && return
+
   omarchy-notification-send \
     "$(msg "Captura copiada al portapapeles" "Screenshot copied to clipboard")" \
     "$(msg "Clic: editar o guardar · Clic derecho: cerrar" "Click: edit or save · Right-click: close")" \
@@ -123,15 +175,18 @@ capture() {
 }
 
 case "${1:-}" in
-edit)
+save | edit | copy | delete)
   [[ -n ${2:-} ]] || {
-    echo "Usage: screenshot-clip edit <file>" >&2
+    echo "Usage: screenshot-clip $1 <file>" >&2
     exit 1
   }
-  edit "$2"
+  "$1" "$2"
+  ;;
+list)
+  list
   ;;
 -h | --help)
-  sed -n '3,17p' "$SELF" | sed 's/^# \{0,1\}//'
+  sed -n '3,24p' "$SELF" | sed 's/^# \{0,1\}//'
   ;;
 *)
   capture "$@"

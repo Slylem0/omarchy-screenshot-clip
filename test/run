@@ -32,6 +32,9 @@ stub hyprctl 'if [[ $1 == getoption ]]; then echo "{\"int\":0}"; fi'
 stub pkill 'exit 1'
 stub omarchy-notification-send 'printf "notify" >>"$LOG"; printf " [%s]" "$@" >>"$LOG"; echo >>"$LOG"'
 stub tensaku 'printf "tensaku" >>"$LOG"; printf " [%s]" "$@" >>"$LOG"; echo >>"$LOG"'
+# The running shell answers "ok" when the plugin's card took the screenshot;
+# empty means the service is not loaded and the notification is the fallback.
+stub omarchy-shell 'printf "shell" >>"$LOG"; printf " [%s]" "$@" >>"$LOG"; echo >>"$LOG"; printf "%s" "${STUB_SHELL_REPLY-}"'
 
 reset_sandbox() {
   rm -rf "${SANDBOX:?}/run" "${SANDBOX:?}/pics" "${SANDBOX:?}/home"
@@ -87,6 +90,16 @@ expect_log "notification expires on its own" "[-t] [6000]"
 expect_log "notification click opens the editor on that copy" "[--exec] [$SCRIPT] [edit] [$shot]"
 expect_log "notification explains right-click closes it" "Right-click: close"
 
+# --- card ----------------------------------------------------------------------
+
+reset_sandbox
+STUB_SHELL_REPLY=ok run
+shot=$(ls "$SANDBOX"/run/screenshot-clip/screenshot-*.png)
+expect_log "capture hands the screenshot to the card" "shell [-q] [slylem0.screenshot-clip] [show] [$shot]"
+if grep -q "^notify" "$LOG"; then fail "card replaces the notification" "$(cat "$LOG")"; else
+  ok "card replaces the notification"
+fi
+
 # --- cancelled selection -----------------------------------------------------
 
 reset_sandbox
@@ -113,6 +126,16 @@ if [[ ! -e $SANDBOX/run/screenshot-clip/screenshot-old-01.png && -e $SANDBOX/run
 else
   fail "pruning drops the oldest copies first" "$(ls "$SANDBOX/run/screenshot-clip")"
 fi
+
+reset_sandbox
+mkdir -p "$SANDBOX/run/screenshot-clip"
+for i in 1 2 3 4; do
+  touch -d "2026-01-01 00:00:0$i" "$SANDBOX/run/screenshot-clip/screenshot-old-$i.png"
+done
+SCREENSHOT_CLIP_KEEP=2 run
+count=$(find "$SANDBOX/run/screenshot-clip" -name 'screenshot-*.png' | wc -l)
+[[ $count -eq 2 ]] && ok "SCREENSHOT_CLIP_KEEP sets how many copies are kept" \
+  || fail "SCREENSHOT_CLIP_KEEP sets how many copies are kept" "found $count"
 
 # --- language ----------------------------------------------------------------
 
@@ -152,12 +175,76 @@ if grep -q "^tensaku" "$LOG"; then fail "edit of a missing copy does not open te
   ok "edit of a missing copy does not open tensaku"
 fi
 
+# --- save / list / copy / delete ---------------------------------------------
+
+new_shot() {
+  mkdir -p "$SANDBOX/run/screenshot-clip"
+  local f="$SANDBOX/run/screenshot-clip/$1"
+  printf "PNG" >"$f"
+  [[ -n ${2:-} ]] && touch -d "$2" "$f"
+  echo "$f"
+}
+
+reset_sandbox
+shot=$(new_shot screenshot-2026-10-25_21-57-42.png)
+out=$(run save "$shot")
+status=$?
+saved="$SANDBOX/pics/screenshot-2026-10-25_21-57-42.png"
+[[ $status -eq 0 && -f $saved ]] && ok "save copies into the pictures folder under the capture's name" \
+  || fail "save copies into the pictures folder under the capture's name" "status $status, $(ls -R "$SANDBOX/pics" 2>&1)"
+[[ $out == "$saved" ]] && ok "save prints where it saved" || fail "save prints where it saved" "$out"
+[[ -f $shot ]] && ok "save keeps the temporary copy" || fail "save keeps the temporary copy" "gone"
+
+out=$(run save "$shot")
+[[ $out == "$SANDBOX/pics/screenshot-2026-10-25_21-57-42-2.png" && -f $out ]] \
+  && ok "saving twice does not overwrite" || fail "saving twice does not overwrite" "$out"
+
+reset_sandbox
+outside="$SANDBOX/home/secret.png"
+printf "PNG" >"$outside"
+run save "$outside" >/dev/null 2>&1
+status=$?
+[[ $status -ne 0 && ! -e $SANDBOX/pics/secret.png ]] && ok "save refuses files outside the temporary folder" \
+  || fail "save refuses files outside the temporary folder" "status $status"
+run delete "$outside" >/dev/null 2>&1
+[[ -f $outside ]] && ok "delete refuses files outside the temporary folder" \
+  || fail "delete refuses files outside the temporary folder" "deleted"
+run save "$SANDBOX/run/screenshot-clip/../../home/secret.png" >/dev/null 2>&1
+[[ ! -e $SANDBOX/pics/secret.png ]] && ok "save refuses .. escapes" || fail "save refuses .. escapes" "saved"
+
+reset_sandbox
+a=$(new_shot screenshot-a.png "2026-01-01 00:00:01")
+b=$(new_shot screenshot-b.png "2026-01-01 00:00:03")
+c=$(new_shot screenshot-c.png "2026-01-01 00:00:02")
+out=$(run list)
+expected=$(printf '%s\n%s\n%s' "$b" "$c" "$a")
+[[ $out == "$expected" ]] && ok "list prints the copies newest first" || fail "list prints the copies newest first" "$out"
+
+reset_sandbox
+out=$(run list)
+status=$?
+[[ $status -eq 0 && -z $out ]] && ok "list with no copies prints nothing" || fail "list with no copies prints nothing" "$status $out"
+
+reset_sandbox
+shot=$(new_shot screenshot-c.png)
+run copy "$shot"
+expect_log "copy puts the PNG back on the clipboard" "wl-copy --type image/png PNG"
+
+run delete "$shot"
+[[ ! -e $shot ]] && ok "delete removes the temporary copy" || fail "delete removes the temporary copy" "still there"
+
 # --- manifest ----------------------------------------------------------------
 
 if command -v omarchy-plugin-validate >/dev/null; then
   if out=$(omarchy-plugin-validate "$ROOT" 2>&1); then ok "manifest validates"; else
     fail "manifest validates" "$out"
   fi
+fi
+
+# --- Model.js ------------------------------------------------------------------
+
+if command -v node >/dev/null; then
+  node "$ROOT/test/model.test.js" || failures=$((failures + 1))
 fi
 
 echo
