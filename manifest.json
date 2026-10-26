@@ -2,14 +2,64 @@
   "schemaVersion": 1,
   "id": "slylem0.screenshot-clip",
   "name": "Screenshot Clip",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Pablo Nicolás Marín",
   "license": "MIT",
-  "description": "Print Screen copies to the clipboard instead of filling ~/Pictures. Click the notification to edit, and save only the screenshots you want to keep.",
+  "description": "Print Screen copies to the clipboard instead of filling ~/Pictures. A floating card lets you save, edit or close each screenshot, and the bar keeps your recent ones until reboot.",
   "kinds": [
-    "service"
+    "service",
+    "bar-widget"
   ],
   "entryPoints": {
-    "service": "Service.qml"
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Screenshot Clip",
+    "description": "Recent screenshots kept in memory: save, edit, copy or delete them",
+    "category": "Utilities",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "language": "auto",
+      "seconds": 6,
+      "keep": 10,
+      "takeOverPrint": true
+    },
+    "schema": [
+      {
+        "key": "language",
+        "type": "enum",
+        "label": "Language",
+        "options": [
+          "auto",
+          "en",
+          "es"
+        ],
+        "defaultValue": "auto",
+        "description": "auto follows the system locale; en and es force English or Spanish."
+      },
+      {
+        "key": "seconds",
+        "type": "integer",
+        "label": "Card stays for (seconds)",
+        "defaultValue": 6,
+        "description": "How long the card stays after a capture. It pauses while the pointer is over it. 2 to 30."
+      },
+      {
+        "key": "keep",
+        "type": "integer",
+        "label": "Recent screenshots to keep",
+        "defaultValue": 10,
+        "description": "Temporary copies kept in memory for the panel. They are cleared on reboot. 1 to 50."
+      },
+      {
+        "key": "takeOverPrint",
+        "type": "boolean",
+        "label": "Use Print Screen",
+        "defaultValue": true,
+        "description": "Bind Print Screen to Screenshot Clip. Turn off to keep Omarchy's own screenshot on that key."
+      }
+    ]
   }
 }
