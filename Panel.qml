@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -21,8 +22,8 @@ Panel {
   readonly property var items: hostWidget ? hostWidget.items : []
   readonly property var savedPaths: hostWidget ? hostWidget.savedPaths : ({})
   readonly property string lang: hostWidget ? hostWidget.lang : "en"
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color accent: Color.accent
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color accent: Commons.Color.accent
   readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.65)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property int inset: Style.space(14)
@@ -215,7 +216,7 @@ Panel {
                     iconText: "\u{F0A7A}"
                     tooltipText: root.tr("remove")
                     foreground: root.foreground
-                    hoverColor: Color.urgent
+                    hoverColor: Commons.Color.urgent
                     onClicked: root.act("delete", row.index)
                   }
                 }

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "slylem0.screenshot-clip",
   "name": "Screenshot Clip",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Pablo Nicolás Marín",
   "license": "MIT",
   "description": "Print Screen copies to the clipboard instead of filling ~/Pictures. A floating card lets you save, edit or close each screenshot, and the bar keeps your recent ones until reboot.",
