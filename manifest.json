@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "slylem0.screenshot-clip",
+  "name": "Screenshot Clip",
+  "version": "1.0.0",
+  "author": "Pablo Nicolás Marín",
+  "license": "MIT",
+  "description": "Print Screen copies to the clipboard instead of filling ~/Pictures. Click the notification to edit, and save only the screenshots you want to keep.",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

@@ -1,0 +1,139 @@
+#!/bin/bash
+
+# screenshot-clip: screenshots that go to the clipboard only.
+#
+# Omarchy's Print Screen saves every capture to ~/Pictures, which fills up with
+# images that were only ever meant to be pasted. This captures the same way
+# (Omarchy's own region picker, so smart/region/window/fullscreen all behave
+# identically) but puts the image on the clipboard and keeps just a temporary
+# copy under $XDG_RUNTIME_DIR, which lives in RAM and is wiped on reboot. The
+# copy feeds the notification thumbnail; clicking the notification opens it in
+# Tensaku, where Ctrl+S saves it to ~/Pictures and Enter copies the edited
+# image without saving anything.
+#
+# Usage:
+#   screenshot-clip [smart|region|windows|fullscreen]   capture (default smart)
+#   screenshot-clip edit <file>                         open a copy in Tensaku
+
+set -o pipefail
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+TEMP_DIR="${XDG_RUNTIME_DIR:-/tmp}/screenshot-clip"
+KEEP=10
+NOTIFY_MS=6000
+
+# SCREENSHOT_CLIP_LANG=es|en forces a language; anything else follows the locale.
+spanish() {
+  case "${SCREENSHOT_CLIP_LANG:-auto}" in
+  es) return 0 ;;
+  en) return 1 ;;
+  esac
+  [[ ${LC_ALL:-${LC_MESSAGES:-${LANG:-}}} == es* ]]
+}
+
+msg() {
+  if spanish; then echo "$1"; else echo "$2"; fi
+}
+
+# Same folder Omarchy's own screenshots use.
+pictures_dir() {
+  # shellcheck source=/dev/null
+  [[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
+  echo "${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
+}
+
+# Keep the newest $KEEP temporary copies; older ones can no longer be clicked
+# from a live notification anyway.
+prune() {
+  local old
+  # shellcheck disable=SC2012 # our own fixed-pattern names, newest first
+  old=$(ls -1t "$TEMP_DIR"/screenshot-*.png 2>/dev/null | tail -n +$((KEEP + 1)))
+  [[ -n $old ]] && xargs -d '\n' rm -f <<<"$old"
+}
+
+edit() {
+  local file="$1"
+  if [[ ! -f $file ]]; then
+    omarchy-notification-send \
+      "$(msg "La captura ya no está disponible" "Screenshot no longer available")" \
+      "$(msg "Las copias temporales se borran al reiniciar." "Temporary copies are cleared on reboot.")" \
+      -t 4000 || true
+    return 1
+  fi
+
+  local dir
+  dir=$(pictures_dir)
+  mkdir -p "$dir"
+
+  # No --save-after-copy: copying from the editor must not write a file.
+  exec tensaku \
+    --filename "$file" \
+    --output-filename "$dir/screenshot-%Y-%m-%d_%H-%M-%S.png" \
+    --actions-on-enter save-to-clipboard \
+    --copy-command wl-copy \
+    --early-exit
+}
+
+# Cursor handling mirrors omarchy-capture-screenshot: software cursors would be
+# baked into the capture, so force hardware cursors until grim has run.
+NO_HW_CURSORS=""
+FREEZE_PID=""
+
+set_no_hw_cursors() {
+  hyprctl eval "hl.config({ cursor = { no_hardware_cursors = $1 } })" &>/dev/null ||
+    hyprctl keyword cursor:no_hardware_cursors "$1" &>/dev/null
+}
+
+cleanup() {
+  [[ -n $FREEZE_PID ]] && kill "$FREEZE_PID" 2>/dev/null
+  [[ -n $NO_HW_CURSORS ]] && set_no_hw_cursors "$NO_HW_CURSORS"
+}
+
+capture() {
+  local mode="${1:-smart}"
+
+  # Pressing Print again while selecting cancels, like the stock screenshot.
+  pkill slurp && exit 0
+
+  NO_HW_CURSORS=$(hyprctl getoption cursor:no_hardware_cursors -j | jq '.int')
+  trap cleanup EXIT
+  set_no_hw_cursors 0
+
+  local selection
+  { read -r FREEZE_PID; read -r selection; } < <(omarchy-capture-region "$mode" --keep-freeze)
+  [[ -z $selection ]] && exit 0
+
+  mkdir -p "$TEMP_DIR"
+  chmod 700 "$TEMP_DIR"
+  local file
+  file="$TEMP_DIR/screenshot-$(date +'%Y-%m-%d_%H-%M-%S').png"
+
+  grim -g "$selection" "$file" || exit 1
+  wl-copy --type image/png <"$file"
+  prune
+
+  # Omarchy's notifications take one click action and no buttons; right-click
+  # already dismisses a toast, so say so.
+  omarchy-notification-send \
+    "$(msg "Captura copiada al portapapeles" "Screenshot copied to clipboard")" \
+    "$(msg "Clic: editar o guardar · Clic derecho: cerrar" "Click: edit or save · Right-click: close")" \
+    --image "$file" \
+    -t "$NOTIFY_MS" \
+    --exec "$SELF" edit "$file" || true
+}
+
+case "${1:-}" in
+edit)
+  [[ -n ${2:-} ]] || {
+    echo "Usage: screenshot-clip edit <file>" >&2
+    exit 1
+  }
+  edit "$2"
+  ;;
+-h | --help)
+  sed -n '3,17p' "$SELF" | sed 's/^# \{0,1\}//'
+  ;;
+*)
+  capture "$@"
+  ;;
+esac

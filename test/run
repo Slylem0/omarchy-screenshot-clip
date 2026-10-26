@@ -1,0 +1,168 @@
+#!/bin/bash
+# Stub bodies are single-quoted on purpose: they expand when the stub runs.
+# shellcheck disable=SC2016,SC2015
+
+# Runs bin/screenshot-clip against stubbed grim, wl-copy, the region picker,
+# hyprctl, tensaku and the notifier, so nothing touches the real screen,
+# clipboard or ~/Pictures. Each stub logs its arguments to $LOG.
+
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+SCRIPT="$ROOT/bin/screenshot-clip"
+failures=0
+
+SANDBOX=$(mktemp -d)
+trap 'rm -rf "$SANDBOX"' EXIT
+
+STUBS="$SANDBOX/stubs"
+LOG="$SANDBOX/log"
+mkdir -p "$STUBS"
+
+stub() {
+  printf '#!/bin/bash\n%s\n' "$2" >"$STUBS/$1"
+  chmod +x "$STUBS/$1"
+}
+
+# The picker prints the freeze PID, then the selection (empty when cancelled).
+stub omarchy-capture-region 'printf "%s\n%s\n" "$$" "${STUB_SELECTION-10,10 100x100}"'
+stub grim 'echo "grim $*" >>"$LOG"; printf "PNG" >"${@: -1}"'
+stub wl-copy 'echo "wl-copy $* $(cat)" >>"$LOG"'
+stub hyprctl 'if [[ $1 == getoption ]]; then echo "{\"int\":0}"; fi'
+stub pkill 'exit 1'
+stub omarchy-notification-send 'printf "notify" >>"$LOG"; printf " [%s]" "$@" >>"$LOG"; echo >>"$LOG"'
+stub tensaku 'printf "tensaku" >>"$LOG"; printf " [%s]" "$@" >>"$LOG"; echo >>"$LOG"'
+
+reset_sandbox() {
+  rm -rf "${SANDBOX:?}/run" "${SANDBOX:?}/pics" "${SANDBOX:?}/home"
+  mkdir -p "$SANDBOX/run" "$SANDBOX/home"
+  : >"$LOG"
+}
+
+run() {
+  env PATH="$STUBS:$PATH" LOG="$LOG" HOME="$SANDBOX/home" \
+    XDG_RUNTIME_DIR="$SANDBOX/run" OMARCHY_SCREENSHOT_DIR="$SANDBOX/pics" \
+    SCREENSHOT_CLIP_LANG="${LANG_UNDER_TEST:-en}" "$SCRIPT" "$@"
+}
+
+ok() { echo "ok   $1"; }
+fail() {
+  echo "FAIL $1: $2"
+  failures=$((failures + 1))
+}
+
+expect_log() {
+  local name="$1" pattern="$2"
+  if grep -qF -- "$pattern" "$LOG"; then ok "$name"; else
+    fail "$name" "expected '$pattern' in log:"
+    sed 's/^/       /' "$LOG"
+  fi
+}
+
+# --- capture -----------------------------------------------------------------
+
+reset_sandbox
+run
+status=$?
+[[ $status -eq 0 ]] && ok "capture exits 0" || fail "capture exits 0" "status $status"
+
+if [[ ! -e $SANDBOX/pics ]] || [[ -z $(ls -A "$SANDBOX/pics") ]]; then
+  ok "capture writes nothing to the pictures folder"
+else
+  fail "capture writes nothing to the pictures folder" "$(ls "$SANDBOX/pics")"
+fi
+
+shots=("$SANDBOX"/run/screenshot-clip/screenshot-*.png)
+if [[ ${#shots[@]} -eq 1 && -f ${shots[0]} ]]; then
+  ok "capture keeps one temporary copy in the runtime dir"
+else
+  fail "capture keeps one temporary copy in the runtime dir" "${shots[*]}"
+fi
+shot="${shots[0]}"
+
+expect_log "capture grabs the selected region" "grim -g 10,10 100x100"
+expect_log "capture copies the PNG to the clipboard" "wl-copy --type image/png PNG"
+expect_log "notification shows the screenshot" "[--image] [$shot]"
+expect_log "notification expires on its own" "[-t] [6000]"
+expect_log "notification click opens the editor on that copy" "[--exec] [$SCRIPT] [edit] [$shot]"
+expect_log "notification explains right-click closes it" "Right-click: close"
+
+# --- cancelled selection -----------------------------------------------------
+
+reset_sandbox
+STUB_SELECTION="" run
+status=$?
+[[ $status -eq 0 ]] && ok "cancel exits 0" || fail "cancel exits 0" "status $status"
+if [[ ! -s $LOG ]]; then ok "cancel captures and notifies nothing"; else
+  fail "cancel captures and notifies nothing" "$(cat "$LOG")"
+fi
+
+# --- pruning -----------------------------------------------------------------
+
+reset_sandbox
+mkdir -p "$SANDBOX/run/screenshot-clip"
+for i in $(seq -w 1 12); do
+  touch -d "2026-01-01 00:00:$i" "$SANDBOX/run/screenshot-clip/screenshot-old-$i.png"
+done
+run
+count=$(find "$SANDBOX/run/screenshot-clip" -name 'screenshot-*.png' | wc -l)
+[[ $count -eq 10 ]] && ok "only the 10 newest temporary copies are kept" \
+  || fail "only the 10 newest temporary copies are kept" "found $count"
+if [[ ! -e $SANDBOX/run/screenshot-clip/screenshot-old-01.png && -e $SANDBOX/run/screenshot-clip/screenshot-old-12.png ]]; then
+  ok "pruning drops the oldest copies first"
+else
+  fail "pruning drops the oldest copies first" "$(ls "$SANDBOX/run/screenshot-clip")"
+fi
+
+# --- language ----------------------------------------------------------------
+
+reset_sandbox
+LANG_UNDER_TEST=es run
+expect_log "Spanish notification" "Captura copiada al portapapeles"
+expect_log "Spanish hint" "Clic derecho: cerrar"
+
+# --- edit --------------------------------------------------------------------
+
+reset_sandbox
+mkdir -p "$SANDBOX/run/screenshot-clip"
+shot="$SANDBOX/run/screenshot-clip/screenshot-x.png"
+printf "PNG" >"$shot"
+run edit "$shot"
+status=$?
+[[ $status -eq 0 ]] && ok "edit exits 0" || fail "edit exits 0" "status $status"
+expect_log "edit opens tensaku on the copy" "[--filename] [$shot]"
+expect_log "edit saves into the pictures folder with a dated name" \
+  "[--output-filename] [$SANDBOX/pics/screenshot-%Y-%m-%d_%H-%M-%S.png]"
+expect_log "Enter copies the edited image" "[--actions-on-enter] [save-to-clipboard]"
+expect_log "editor closes after copy or save" "[--early-exit]"
+[[ -d $SANDBOX/pics ]] && ok "edit creates the pictures folder" \
+  || fail "edit creates the pictures folder" "missing"
+if grep -qF -- "--save-after-copy" "$LOG"; then
+  fail "copying from the editor does not also save a file" "$(cat "$LOG")"
+else
+  ok "copying from the editor does not also save a file"
+fi
+
+reset_sandbox
+run edit "$SANDBOX/run/screenshot-clip/gone.png"
+status=$?
+[[ $status -ne 0 ]] && ok "edit of a missing copy fails" || fail "edit of a missing copy fails" "status 0"
+expect_log "edit of a missing copy explains why" "no longer available"
+if grep -q "^tensaku" "$LOG"; then fail "edit of a missing copy does not open tensaku" "$(cat "$LOG")"; else
+  ok "edit of a missing copy does not open tensaku"
+fi
+
+# --- manifest ----------------------------------------------------------------
+
+if command -v omarchy-plugin-validate >/dev/null; then
+  if out=$(omarchy-plugin-validate "$ROOT" 2>&1); then ok "manifest validates"; else
+    fail "manifest validates" "$out"
+  fi
+fi
+
+echo
+if ((failures)); then
+  echo "$failures failure(s)"
+  exit 1
+fi
+echo "all passed"
